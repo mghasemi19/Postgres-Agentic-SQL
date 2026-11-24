@@ -1,10 +1,12 @@
 # PostgreSQL Database Agent
 
+![alt text](<PostgreSQL Database Agent Infographic.png>)
+
 A production-style natural-language-to-SQL agent for PostgreSQL.
 
 The service accepts a user's question, inspects the relevant database schema, asks an LLM to generate PostgreSQL, validates the SQL with an AST parser, runs the query inside a read-only transaction with a statement timeout, and turns the returned rows into a concise answer.
 
-This repository is intentionally **not** the usual demo where an LLM receives a database password and gets to improvise. The execution path is constrained by application guardrails **and** PostgreSQL permissions.
+The execution path is constrained by application guardrails **and** PostgreSQL permissions.
 
 ## What this project demonstrates
 
@@ -69,6 +71,22 @@ summarize
       v
 END
 ```
+
+```text
+Customer
+   │
+   ├── Order
+   │     │
+   │     ├── Order Item ─── Product
+   │     │
+   │     └── Order Item ─── Product
+   │
+   └── Order
+         │
+         ├── Order Item ─── Product
+         └── Order Item ─── Product
+END
+```         
 
 ## Safety model
 

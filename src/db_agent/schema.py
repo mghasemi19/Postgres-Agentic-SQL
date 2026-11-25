@@ -1,3 +1,18 @@
+'''
+schema.py is the file that lets the agent inspect your PostgreSQL database structure 
+and prepare a compact schema description for the LLM.
+
+PostgreSQL
+   ↓
+inspect tables/columns/keys
+   ↓
+rank relevant tables
+   ↓
+build schema text
+   ↓
+send that context to the LLM
+'''
+
 from __future__ import annotations
 
 import re
@@ -22,6 +37,14 @@ class TableSummary:
     def fq_name(self) -> str:
         return f"{self.schema}.{self.table}"
 
+'''
+TableSummary(
+    schema="public",
+    table="orders",
+    columns=("order_id", "customer_id", "status", "ordered_at", "currency")
+)
+'''    
+
 
 class SchemaCatalog:
     def __init__(self, engine: Engine, settings: Settings):
@@ -30,11 +53,15 @@ class SchemaCatalog:
         self._catalog: list[TableSummary] = []
         self._cached_at = 0.0
 
+
+
+    # Reuse the discovered catalog until its configured cache lifetime expires.
     def _refresh_if_needed(self) -> None:
         now = time.monotonic()
         if self._catalog and now - self._cached_at < self.settings.schema_cache_ttl_seconds:
             return
 
+        # SQLAlchemy inspection reads names and column metadata from PostgreSQL.
         inspector = inspect(self.engine)
         catalog: list[TableSummary] = []
         for schema in self.settings.allowed_schemas:
@@ -47,6 +74,9 @@ class SchemaCatalog:
         self._catalog = catalog
         self._cached_at = now
 
+
+
+    # Rank likely relevant tables so large schemas fit within the LLM context.
     def rank_tables(self, question: str) -> list[TableSummary]:
         self._refresh_if_needed()
         if len(self._catalog) <= self.settings.schema_top_k:
@@ -63,24 +93,39 @@ class SchemaCatalog:
             }
             table_overlap = len(q_tokens & table_tokens)
             column_overlap = len(q_tokens & column_tokens)
-            # Table-name matches are more informative than a generic column match such as "id".
+            # Give table-name matches more weight than generic column matches like "id".
             return (table_overlap * 5 + column_overlap, table_overlap, item.fq_name)
 
         ranked = sorted(self._catalog, key=score, reverse=True)
         selected = ranked[: self.settings.schema_top_k]
 
-        # If lexical matching produces all-zero scores, stable alphabetic coverage is safer than random.
+        # If nothing matches, choose a stable alphabetic subset instead of arbitrary ordering.
         if score(selected[0])[0] == 0:
             return sorted(self._catalog, key=lambda x: x.fq_name)[: self.settings.schema_top_k]
         return selected
 
+    '''
+    100 database tables
+        ↓
+    rank_tables()
+            ↓
+    12 relevant tables
+            ↓
+            LLM
+    '''
+
+
+
+    # Format selected tables and their relationships as context for SQL generation.
     def context_for_question(self, question: str) -> str:
         self._refresh_if_needed()
+        # SQLAlchemy inspection reads names and column metadata from PostgreSQL.
         inspector = inspect(self.engine)
         tables = self.rank_tables(question)
         chunks: list[str] = []
 
         for item in tables:
+            # Include column types/nullability plus keys so the model can form valid joins.
             cols = inspector.get_columns(item.table, schema=item.schema)
             pk = inspector.get_pk_constraint(item.table, schema=item.schema) or {}
             fks = inspector.get_foreign_keys(item.table, schema=item.schema) or []
@@ -106,6 +151,22 @@ class SchemaCatalog:
                     )
             chunks.append("")
 
+        # Return an explicit empty-catalog message rather than an empty prompt section.
         if not chunks:
             return "No accessible tables were discovered in the allowed schemas."
         return "\n".join(chunks).strip()
+
+'''
+TABLE public.orders
+  - order_id: BIGINT NOT NULL
+  - customer_id: BIGINT NOT NULL
+  - status: TEXT NOT NULL
+  - ordered_at: TIMESTAMP WITH TIME ZONE NOT NULL
+  - currency: CHAR(3) NOT NULL
+
+  PRIMARY KEY (order_id)
+
+  FOREIGN KEY (customer_id)
+    -> public.customers(customer_id)
+and the samething for other tables, plus a final empty line.
+'''    

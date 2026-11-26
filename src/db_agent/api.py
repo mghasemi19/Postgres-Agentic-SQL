@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import time
 from functools import lru_cache
+from pathlib import Path
 
 import structlog
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.staticfiles import StaticFiles
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 
 from .config import get_settings
@@ -89,3 +91,12 @@ def query(payload: QueryRequest) -> QueryResponse:
         raise HTTPException(status_code=500, detail="Database agent failed") from exc
     finally:
         LATENCY.labels(endpoint=endpoint).observe(time.perf_counter() - started)
+
+
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+
+@app.get("/", include_in_schema=False)
+def index() -> FileResponse:
+    return FileResponse(STATIC_DIR / "index.html")

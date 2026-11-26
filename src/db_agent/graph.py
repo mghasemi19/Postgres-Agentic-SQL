@@ -18,7 +18,8 @@ from .schema import SchemaCatalog
 logger = structlog.get_logger(__name__)
 
 
-class AgentState(TypedDict, total=False):
+# Shared state passed between graph nodes; each node returns only the fields it updates.
+class AgentState(TypedDict, total=False):   # means that not all fields must exist when the state is initialized.
     question: str
     request_id: str
     schema_context: str
@@ -34,6 +35,9 @@ class AgentState(TypedDict, total=False):
 
 
 class DatabaseAgentGraph:
+
+
+    # Assemble the schema catalog, SQL policy, model clients, and compiled workflow.
     def __init__(self, settings: Settings, database: Database):
         self.settings = settings
         self.database = database
@@ -43,6 +47,10 @@ class DatabaseAgentGraph:
         self.sql_llm = self.llm.with_structured_output(SQLProposal)
         self.graph = self._build().compile()
 
+
+
+
+    # Define the allowed order of work and the retry/rejection branches.
     def _build(self) -> StateGraph:
         graph = StateGraph(AgentState)
         graph.add_node("inspect_schema", self.inspect_schema)
@@ -69,10 +77,18 @@ class DatabaseAgentGraph:
         graph.add_edge("fail", END)
         return graph
 
+
+
+
+    # Select relevant database metadata before asking the model to write SQL.
     def inspect_schema(self, state: AgentState) -> AgentState:
         context = self.catalog.context_for_question(state["question"])
         return {"schema_context": context, "attempt": 0}
 
+
+
+
+    # Ask for a typed SQL proposal, including any prior database error for repair.
     def generate_sql(self, state: AgentState) -> AgentState:
         attempt = int(state.get("attempt", 0)) + 1
         system = SQL_SYSTEM_PROMPT.format(
@@ -98,6 +114,10 @@ class DatabaseAgentGraph:
             "validation_error": "",
         }
 
+
+
+
+    # Apply deterministic SQL policy checks before any query reaches PostgreSQL.
     def validate_sql(self, state: AgentState) -> AgentState:
         result = self.validator.validate(state.get("sql", ""))
         if not result.allowed:
@@ -112,9 +132,17 @@ class DatabaseAgentGraph:
             }
         return {"sql": result.sql or "", "validation_error": ""}
 
+
+
+
+    # Route rejected SQL to a safe failure response and approved SQL to execution.
     def after_validation(self, state: AgentState) -> str:
         return "fail" if state.get("validation_error") else "execute"
 
+
+
+
+    # Run the validated query and store either its results or a sanitized error.
     def execute_sql(self, state: AgentState) -> AgentState:
         try:
             result = self.database.execute_readonly(state["sql"])
@@ -140,6 +168,10 @@ class DatabaseAgentGraph:
             )
             return {"execution_error": error}
 
+
+
+
+    # Retry database errors only while the configured attempt budget remains.
     def after_execution(self, state: AgentState) -> str:
         if not state.get("execution_error"):
             return "summarize"
@@ -147,6 +179,10 @@ class DatabaseAgentGraph:
             return "retry"
         return "fail"
 
+
+
+
+    # Ask the model to explain the returned rows without adding unsupported facts.
     def summarize(self, state: AgentState) -> AgentState:
         compact_rows = state.get("rows", [])[: self.settings.max_rows]
         payload = json.dumps(
@@ -171,6 +207,10 @@ class DatabaseAgentGraph:
         answer = response.content if isinstance(response.content, str) else str(response.content)
         return {"answer": answer, "status": "ok"}
 
+
+
+
+    # Turn validation and execution failures into clear user-facing responses.
     def fail(self, state: AgentState) -> AgentState:
         if state.get("validation_error"):
             return {
@@ -186,8 +226,14 @@ class DatabaseAgentGraph:
             }
         return {"status": "error", "answer": "The database agent could not complete the request."}
 
+
+
+
     def invoke(self, *, question: str, request_id: str) -> AgentState:
         return self.graph.invoke({"question": question, "request_id": request_id})
+
+
+
 
 
 def _sanitize_db_error(message: str) -> str:
